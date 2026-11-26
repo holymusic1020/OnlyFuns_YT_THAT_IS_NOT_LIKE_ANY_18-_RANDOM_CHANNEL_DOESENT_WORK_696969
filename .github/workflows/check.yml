@@ -44,15 +44,21 @@ jobs:
           woke=no
           if [ "${stage}" != "RUNTIME" ] || [ "${FORCE}" = "yes" ]; then
             woke=yes
-            echo "poking upstream (state=${stage}, force=${FORCE:-no}) ..."
-            code=$(curl -s -o restart.json -w '%{http_code}' --retry 2 --retry-delay 5 \
-              -X POST -H "Authorization: Bearer ${HF_TOKEN}" \
-              "https://huggingface.co/api/spaces/${SPACE_ID}/restart" || echo 000)
-            echo "poke -> HTTP ${code}: $(cat restart.json 2>/dev/null || true)"
+            if [ -n "${HF_TOKEN:-}" ]; then
+              echo "poking upstream (state=${stage}, force=${FORCE:-no}) ..."
+              code=$(curl -s -o restart.json -w '%{http_code}' --retry 2 --retry-delay 5 \
+                -X POST -H "Authorization: Bearer ${HF_TOKEN}" \
+                "https://huggingface.co/api/spaces/${SPACE_ID}/restart" || echo 000)
+              echo "poke -> HTTP ${code}: $(cat restart.json 2>/dev/null || true)"
+            else
+              echo "no token on hand — the endpoint GET below does the wake"
+            fi
           fi
           echo "woke=${woke}" >> "$GITHUB_OUTPUT"
-          for i in $(seq 1 30); do
-            http=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
+          # GET / wakes it (proven 2026-11-26: 17s cold boot from SLEEPING);
+          # subpaths like /healthz get an instant 503 and never wake anything.
+          for i in $(seq 1 15); do
+            http=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
               "${SPACE_URL}/" || echo 000)
             echo "attempt ${i}: HTTP ${http}"
             if [ "${http}" = "200" ]; then
@@ -61,7 +67,7 @@ jobs:
             fi
             sleep 10
           done
-          echo "endpoint still not answering after 5min" >&2
+          echo "endpoint still not answering after ~10min" >&2
           exit 1
 
       - name: heads-up

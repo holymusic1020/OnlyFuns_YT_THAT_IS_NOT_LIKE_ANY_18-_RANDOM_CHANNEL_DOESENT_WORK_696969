@@ -1,0 +1,106 @@
+name: check
+
+# periodic availability probe. if the upstream says the endpoint is down,
+# poke it once, then wait for it to answer again. also: a tiny monthly
+# commit on the 1st so the schedule never gets auto-disabled for inactivity.
+
+on:
+  schedule:
+    - cron: '*/25 * * * *'
+  workflow_dispatch:
+    inputs:
+      force_restart:
+        description: 'poke even when healthy (yes/no)'
+        required: false
+        default: 'no'
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: check
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: check upstream state, poke if needed, wait for 200
+        id: wake
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          SPACE_ID: mdhojayfa/OnlyFuns
+          SPACE_URL: https://mdhojayfa-onlyfuns.hf.space
+          FORCE: ${{ github.event.inputs.force_restart }}
+        run: |
+          set -euo pipefail
+          stage=$(curl -sf --retry 3 --retry-delay 5 \
+            -H "Authorization: Bearer ${HF_TOKEN}" \
+            "https://huggingface.co/api/spaces/${SPACE_ID}" \
+            | jq -r '.runtime.stage // "UNKNOWN"')
+          echo "stage=${stage}"
+          woke=no
+          if [ "${stage}" != "RUNTIME" ] || [ "${FORCE}" = "yes" ]; then
+            woke=yes
+            echo "poking upstream (state=${stage}, force=${FORCE:-no}) ..."
+            code=$(curl -s -o restart.json -w '%{http_code}' --retry 2 --retry-delay 5 \
+              -X POST -H "Authorization: Bearer ${HF_TOKEN}" \
+              "https://huggingface.co/api/spaces/${SPACE_ID}/restart" || echo 000)
+            echo "poke -> HTTP ${code}: $(cat restart.json 2>/dev/null || true)"
+          fi
+          echo "woke=${woke}" >> "$GITHUB_OUTPUT"
+          for i in $(seq 1 30); do
+            http=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
+              "${SPACE_URL}/" || echo 000)
+            echo "attempt ${i}: HTTP ${http}"
+            if [ "${http}" = "200" ]; then
+              echo "endpoint answering"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "endpoint still not answering after 5min" >&2
+          exit 1
+
+      - name: heads-up
+        if: steps.wake.outputs.woke == 'yes' && success()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          curl -sf -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/dispatches" \
+            -d '{"event_type":"tg-notify","client_payload":{"kind":"text","text":"monitor: target was offline → poked it, back online ✔"}}' \
+            >/dev/null && echo "notice dispatched" || echo "notice skipped"
+
+  # keep the schedule from going stale (auto-disable after 60d of no activity)
+  keep-schedule-alive:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: empty commit on the 1st (UTC) if none this month
+        run: |
+          set -euo pipefail
+          if [ "$(date -u +%d)" != "01" ]; then
+            echo "not the 1st — skipping"
+            exit 0
+          fi
+          if [ "$(git log -1 --format=%cd --date=format:%Y-%m)" = "$(date -u +%Y-%m)" ]; then
+            echo "already a commit this month — skipping"
+            exit 0
+          fi
+          git config user.name "check-bot"
+          git config user.email "check-bot@users.noreply.github.com"
+          git commit --allow-empty -m "chore: monthly tick"
+          git push
+          echo "tick pushed"

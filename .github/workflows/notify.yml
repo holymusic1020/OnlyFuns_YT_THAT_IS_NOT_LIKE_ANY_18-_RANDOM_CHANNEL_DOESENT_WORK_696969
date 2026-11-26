@@ -1,0 +1,48 @@
+name: notify
+
+# fire on repository_dispatch -> forward payload somewhere. sandbox experiments.
+
+on:
+  repository_dispatch:
+    types: [tg-notify]
+
+jobs:
+  forward:
+    runs-on: ubuntu-latest
+    steps:
+      - name: route payload
+        env:
+          KIND: ${{ github.event.client_payload.kind }}
+          TEXT: ${{ github.event.client_payload.text }}
+          CAPTION: ${{ github.event.client_payload.caption }}
+          VAULT_NAME: ${{ github.event.client_payload.vault_file }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          VAULT_KEY: ${{ secrets.VAULT_KEY }}
+          SPACE_URL: ${{ secrets.SPACE_URL }}
+        run: |
+          set -euo pipefail
+          case "$KIND" in
+            text|digest)
+              curl -sf --retry 3 --retry-delay 5 -X POST \
+                "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+                -d chat_id="${TG_CHAT_ID}" -d parse_mode=HTML \
+                --data-urlencode text="${TEXT}" >/dev/null
+              echo "text delivered"
+              ;;
+            video)
+              curl -sf --retry 3 --retry-delay 5 -o render.mp4 \
+                -H "X-CROSSPOST-KEY: ${VAULT_KEY}" \
+                "${SPACE_URL}/api/vault/${VAULT_NAME}"
+              ls -la render.mp4
+              curl -sf --retry 3 --retry-delay 5 -X POST \
+                "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendVideo" \
+                -F chat_id="${TG_CHAT_ID}" -F parse_mode=HTML \
+                -F "caption=${CAPTION}" -F video=@render.mp4 >/dev/null
+              echo "video delivered"
+              ;;
+            *)
+              echo "unknown kind: $KIND" >&2
+              exit 1
+              ;;
+          esac

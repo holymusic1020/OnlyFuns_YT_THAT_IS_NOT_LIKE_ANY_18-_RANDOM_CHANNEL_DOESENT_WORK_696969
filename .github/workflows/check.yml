@@ -42,7 +42,7 @@ jobs:
             | jq -r '.runtime.stage // "UNKNOWN"')
           echo "stage=${stage}"
           woke=no
-          if [ "${stage}" != "RUNTIME" ] || [ "${FORCE}" = "yes" ]; then
+          if [ "${stage}" != "RUNNING" ] || [ "${FORCE}" = "yes" ]; then
             woke=yes
             if [ -n "${HF_TOKEN:-}" ]; then
               echo "poking upstream (state=${stage}, force=${FORCE:-no}) ..."
